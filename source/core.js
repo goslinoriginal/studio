@@ -105,6 +105,8 @@ const PAY_METHODS = ["EFT", "Cash", "Card", "SnapScan / Zapper", "Other"];
 
 /* ---------- Data ---------- */
 const COLLS = ["clients", "leads", "jobs", "tasks", "docs", "payments", "expenses"];
+// Everything that gets saved and synced. "devices" = phones with notifications switched on.
+const DATA_COLLS = [...COLLS, "devices"];
 const DEFAULT_SETTINGS = {
   people: ["Damien", "Mari"],
   bizName: "Mari & Damien",
@@ -114,16 +116,26 @@ const DEFAULT_SETTINGS = {
   invPrefix: "INV-", quotePrefix: "Q-",
   terms: 7, quoteValid: 14, vat: 0,
   footer: "Thank you for your business!",
+  pushKey: "", pushWorker: "", tz: "Africa/Johannesburg",
   checklist: ["Get logo & photos", "Get business info & text", "Register domain", "Build first draft", "Client feedback", "Final changes", "Go live", "Send final invoice"],
   updatedAt: 0,
 };
-const blank = () => ({ v: 1, ...Object.fromEntries(COLLS.map(c => [c, []])), settings: { ...DEFAULT_SETTINGS }, deleted: {} });
+const blank = () => ({ v: 1, ...Object.fromEntries(DATA_COLLS.map(c => [c, []])), settings: { ...DEFAULT_SETTINGS }, deleted: {} });
 
 const LS_DATA = "studio_data", LS_CFG = "studio_cfg";
-let S = (() => { try { const d = JSON.parse(localStorage.getItem(LS_DATA)); if (d && d.v) { for (const c of COLLS) d[c] ||= []; d.deleted ||= {}; d.settings = { ...DEFAULT_SETTINGS, ...d.settings }; return d; } } catch {} return blank(); })();
+let S = (() => { try { const d = JSON.parse(localStorage.getItem(LS_DATA)); if (d && d.v) { for (const c of DATA_COLLS) d[c] ||= []; d.deleted ||= {}; d.settings = { ...DEFAULT_SETTINGS, ...d.settings }; return d; } } catch {} return blank(); })();
 let CFG = (() => { try { return JSON.parse(localStorage.getItem(LS_CFG)) || {}; } catch { return {}; } })();
 const saveLocal = () => { try { localStorage.setItem(LS_DATA, JSON.stringify(S)); } catch (e) { toast("Couldn't save on this device: " + e.message); } };
-const saveCfg = () => localStorage.setItem(LS_CFG, JSON.stringify(CFG));
+const saveCfg = () => { localStorage.setItem(LS_CFG, JSON.stringify(CFG)); shareWithWorker(); };
+// The background helper (sw.js) can't read localStorage, so it gets its own copy of
+// the sync details in IndexedDB. It needs them to snooze or tick off a reminder
+// straight from a notification.
+function idbKV() {
+  return new Promise((res, rej) => { const r = indexedDB.open("studio", 1); r.onupgradeneeded = () => r.result.createObjectStore("kv"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function shareWithWorker() {
+  try { const db = await idbKV(); const tx = db.transaction("kv", "readwrite"); tx.objectStore("kv").put({ sync: CFG.sync || null, me: CFG.me || "" }, "cfg"); } catch {}
+}
 const ME = () => CFG.me || S.settings.people[0];
 const OTHER = () => S.settings.people.find(p => p !== ME()) || S.settings.people[1];
 
@@ -155,7 +167,7 @@ function merge(a, b) {
   const out = blank();
   out.deleted = { ...(a.deleted || {}) };
   for (const [id, ts] of Object.entries(b.deleted || {})) out.deleted[id] = Math.max(out.deleted[id] || 0, ts);
-  for (const c of COLLS) {
+  for (const c of DATA_COLLS) {
     const map = new Map();
     for (const r of [...(a[c] || []), ...(b[c] || [])]) {
       const cur = map.get(r.id);
@@ -170,7 +182,7 @@ function merge(a, b) {
 // Same data always serialises the same way, so we can tell if anything really changed.
 function canon(d) {
   const out = { v: 1 };
-  for (const c of COLLS) out[c] = [...(d[c] || [])].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  for (const c of DATA_COLLS) out[c] = [...(d[c] || [])].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
   out.settings = { ...DEFAULT_SETTINGS, ...(d.settings || {}) };
   // forget deletion markers older than 120 days to keep the file small
   const cutoff = Date.now() - 120 * 864e5;

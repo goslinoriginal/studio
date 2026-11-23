@@ -440,13 +440,28 @@ function editTask(rec = {}) {
     title: rec.id ? "Edit reminder" : "New reminder",
     fields: [
       { k: "title", label: "What", req: true, ph: "Call Sipho about the quote" },
-      { k: "date", label: "Day", type: "date", half: true }, { k: "time", label: "Time (optional)", type: "time", half: true },
+      { k: "date", label: "Day", type: "date", half: true }, { k: "time", label: "Time (optional)", type: "time", half: true, hint: pushReady() ? "No time? It pings at 8am." : "" },
       { k: "who", label: "For", type: "select", options: whoOptions(), half: true },
       { k: "linkId", label: "About", type: "select", options: links, half: true },
       { k: "notes", label: "Notes", type: "textarea" },
     ],
     rec, saveLabel: rec.id ? "Save" : "Add reminder",
     onMount: ov => {
+      if (rec.id && !rec.done) {
+        // Snooze buttons at the top (this is also where you land when you tap a notification)
+        const box = document.createElement("div"); box.className = "card pad"; box.style.marginBottom = "12px";
+        box.innerHTML = `<div class="small" style="font-weight:600;margin-bottom:8px">${isSnoozed(rec) ? `Snoozed until ${esc(snoozeLabel(rec.snoozeUntil))} · <a href="#" data-unsnooze>Cancel snooze</a>` : "Snooze"}</div>
+          <div class="chips" style="padding:0;flex-wrap:wrap">${SNOOZES.map(([k, l]) => `<button type="button" class="chip" data-snooze="${k}">${l}</button>`).join("")}</div>`;
+        box.onclick = e => {
+          const b = e.target.closest("[data-snooze],[data-unsnooze]"); if (!b) return;
+          e.preventDefault(); e.stopPropagation();
+          const t = get("tasks", rec.id); if (!t) return;
+          closeSheet();
+          if (b.dataset.snooze) { const at = snoozeTime(b.dataset.snooze); upsert("tasks", { ...t, snoozeUntil: at }); toast("Snoozed until " + snoozeLabel(at)); }
+          else { const { snoozeUntil, ...rest } = t; upsert("tasks", rest); toast("Snooze cancelled"); }
+        };
+        ov.querySelector("#frm").before(box);
+      }
       if (rec.id) {
         const f = ov.querySelector(".sheet-f");
         const b = document.createElement("button"); b.className = "btn"; b.style.flex = "0 0 auto"; b.title = "Add to phone calendar"; b.innerHTML = icon("cal");
@@ -454,6 +469,7 @@ function editTask(rec = {}) {
       }
     },
     onSave: r => {
+      if (r.date !== rec.date || r.time !== rec.time) delete r.snoozeUntil; // new time replaces the snooze
       upsert("tasks", r); toast(rec.id ? "Reminder updated" : "Reminder added");
       const top = SHEETS[SHEETS.length - 1];
       if (top && top.dataset.key) { const [k, id] = top.dataset.key.split(":"); refreshTop(() => ({ lead: leadDetail, client: clientDetail })[k]?.(id)); }
@@ -512,6 +528,9 @@ function settingsSheet() {
         <div class="small muted" style="margin:16px 0 6px">Or, if ${esc(OTHER())} already set it up, paste their invite link:</div>
         <div style="display:flex;gap:8px"><input id="joinLink" placeholder="https://…#join=…" style="flex:1;min-width:0;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--surface);font-size:16px"><button class="btn" data-act="join-paste">Join</button></div>`}
       </div>
+
+      <div class="section-h section"><h2 style="font-size:17px">Notifications</h2></div>
+      <div class="card pad">${notifySection()}</div>
 
       <div class="section-h section"><h2 style="font-size:17px">On your quotes & invoices</h2></div>
       <div class="card pad"><form class="form" id="setForm">
@@ -622,8 +641,11 @@ const ACT = {
   "doc-wa": id => { const d = get("docs", id), c = get("clients", d.clientId) || (d.leadId && get("leads", d.leadId)) || {}; window.open(c.phone ? waLink(c.phone, docMessage(d)) : "https://wa.me/?text=" + encodeURIComponent(docMessage(d)), "_blank"); if (d.status === "draft") upsert("docs", { ...d, status: "sent", sentOn: today() }); },
   "doc-mail": id => { const d = get("docs", id), c = get("clients", d.clientId) || {}; location.href = `mailto:${encodeURIComponent(c.email || "")}?subject=${encodeURIComponent(`${d.type === "quote" ? "Quote" : "Invoice"} ${d.number} from ${S.settings.bizName}`)}&body=${encodeURIComponent(docMessage(d) + "\n\n(PDF attached)")}`; },
   "doc-dup": id => { const d = JSON.parse(JSON.stringify(get("docs", id))); for (const k of ["id", "createdAt", "updatedAt", "by", "sentOn", "fromQuote"]) delete d[k]; closeSheet(); editDoc({ ...newDoc(d.type), clientId: d.clientId, jobId: d.jobId, items: d.items, discount: d.discount, vat: d.vat, notes: d.notes }); },
-  "toggle-task": (id, el) => { const t = get("tasks", id); upsert("tasks", { ...t, done: el.checked, doneAt: el.checked ? Date.now() : null }); if (el.checked) toast("Done ✓"); const top = SHEETS[SHEETS.length - 1]; if (top && top.dataset.key) { const [k, kid] = top.dataset.key.split(":"); refreshTop(() => ({ lead: leadDetail, client: clientDetail })[k]?.(kid)); } },
-  "pick-me": id => { CFG.me = id; saveCfg(); if (SHEETS.length) refreshTop(settingsSheet); render(); syncNow(true); },
+  "toggle-task": (id, el) => { const t = get("tasks", id); upsert("tasks", { ...t, done: el.checked, doneAt: el.checked ? Date.now() : null, snoozeUntil: el.checked ? null : t.snoozeUntil }); if (el.checked) toast("Done ✓"); const top = SHEETS[SHEETS.length - 1]; if (top && top.dataset.key) { const [k, kid] = top.dataset.key.split(":"); refreshTop(() => ({ lead: leadDetail, client: clientDetail })[k]?.(kid)); } },
+  "pick-me": id => { CFG.me = id; saveCfg(); if (SHEETS.length) refreshTop(settingsSheet); render(); checkPush(); syncNow(true); },
+  "push-on": () => turnOnPush(), "push-off": () => turnOffPush(), "push-test": () => sendTestPush(),
+  "push-key": () => makeNotifyKey(), "push-worker": () => saveWorkerUrl(), "copy-worker": () => copyWorkerCode(),
+  "copy-token": () => copyText(CFG.sync.token, "Token copied. Keep it private"), "copy-text": id => copyText(id),
   "theme": id => { CFG.theme = id; saveCfg(); applyTheme(); refreshTop(settingsSheet); },
   "save-settings": () => {
     const f = $("#setForm"), v = k => f.querySelector(`[name="${k}"]`).value;
@@ -696,7 +718,13 @@ function joinFromCode(code) {
     if (!joinFromCode(m[1])) alert("That invite link looks broken. Ask for a new one.");
     history.replaceState(null, "", location.pathname);
   }
+  // Opened by tapping a notification
+  const tk = location.hash.match(/#task=([^&]+)/);
+  if (tk) history.replaceState(null, "", location.pathname);
   applyTheme(); render();
-  if (CFG.sync) syncNow(true);
+  shareWithWorker();
+  const ready = CFG.sync ? syncNow(true) : Promise.resolve();
+  if (tk) ready.finally(() => { const t = get("tasks", tk[1]); if (t && CFG.me) editTask({ ...t }); });
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
+  ready.finally(checkPush);
 })();

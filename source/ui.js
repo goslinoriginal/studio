@@ -309,5 +309,5 @@ function taskRow(k) {
   return `<div class="row" data-act="task" data-id="${k.id}">
     <input type="checkbox" ${k.done ? "checked" : ""} data-act="toggle-task" data-id="${k.id}" style="width:22px;height:22px;accent-color:var(--sage);flex:none;cursor:pointer" aria-label="Done">
     <span class="grow"><span class="t" style="display:block;${k.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(k.title)}</span>
-    <span class="s" style="display:block">${[k.date ? `<span style="${late ? "color:var(--bad)" : ""}">${niceDate(k.date)}${k.time ? " " + k.time : ""}</span>` : "", link ? esc(link.business) : "", k.who && k.who !== "Both" ? esc(k.who) : ""].filter(Boolean).join(" · ") || "No date"}</span></span></div>`;
+    <span class="s" style="display:block">${[k.date ? `<span style="${late ? "color:var(--bad)" : ""}">${niceDate(k.date)}${k.time ? " " + k.time : ""}</span>` : "", isSnoozed(k) ? `<span style="color:var(--sky)">Snoozed to ${esc(snoozeLabel(k.snoozeUntil))}</span>` : "", link ? esc(link.business) : "", k.who && k.who !== "Both" ? esc(k.who) : ""].filter(Boolean).join(" · ") || "No date"}</span></span></div>`;
 }

@@ -32,9 +32,22 @@ Every change is saved to `studio-data` as a commit, so GitHub also keeps a full 
 
 The token expires after a year. When it does, the app shows "Sync problem". To fix it, make a new token the same way, tap **Unlink this device**, connect again and send a new invite link.
 
+## 4. Notifications (optional, once)
+
+Reminders can pop up on your phones even when Studio is closed. A small free Cloudflare Worker (`worker/worker.js`) checks your reminders every minute and sends them. The app walks you through it in **Settings → Notifications**:
+
+1. Tap **Make notification key** and copy the private key it shows. It's only shown once.
+2. On dash.cloudflare.com go to **Workers & Pages → Create → Worker**, name it `studio-reminders`, deploy, then **Edit code**. Paste the Worker code (the app has a **Copy Worker code** button) and deploy.
+3. Under the Worker's **Settings → Variables and Secrets**, add two **Secrets**: `GITHUB_TOKEN` (the same access token the app uses; the app has a **Copy token** button) and `VAPID_PRIVATE_KEY` (the key from step 1).
+4. Add a **Cron Trigger** that runs every minute (`* * * * *`).
+5. Paste the Worker's link into the app and tap Save. Open the link in a browser to check it says `"ok": true`.
+6. Each of you taps **Turn on** on your own phone. On iPhone this only works from the Home Screen app (iOS 16.4 or newer).
+
+Reminders go to whoever they're for (or both of you). Ones without a time ping at 8am. On Android and computers the notification has **Snooze 1 hour** and **Done** buttons. On iPhone, tap it to open the reminder, where you can snooze for 15 min, 1 hour, 3 hours or until tomorrow.
+
 ## Updating the app
 
-Change the files, then change `VERSION` in `sw.js` (for example from `studio-v1` to `studio-v2`) and upload again. Your data isn't affected.
+The app is built from the files in `source/`: change them, run `sh source/build.sh` to rebuild `index.html`, then change `VERSION` in `sw.js` (for example from `studio-v1` to `studio-v2`) and upload again. Your data isn't affected.
 
 ## Backups
 

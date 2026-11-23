@@ -332,6 +332,8 @@ const PAY_METHODS = ["EFT", "Cash", "Card", "SnapScan / Zapper", "Other"];
 
 /* ---------- Data ---------- */
 const COLLS = ["clients", "leads", "jobs", "tasks", "docs", "payments", "expenses"];
+// Everything that gets saved and synced. "devices" = phones with notifications switched on.
+const DATA_COLLS = [...COLLS, "devices"];
 const DEFAULT_SETTINGS = {
   people: ["Damien", "Mari"],
   bizName: "Mari & Damien",
@@ -341,16 +343,26 @@ const DEFAULT_SETTINGS = {
   invPrefix: "INV-", quotePrefix: "Q-",
   terms: 7, quoteValid: 14, vat: 0,
   footer: "Thank you for your business!",
+  pushKey: "", pushWorker: "", tz: "Africa/Johannesburg",
   checklist: ["Get logo & photos", "Get business info & text", "Register domain", "Build first draft", "Client feedback", "Final changes", "Go live", "Send final invoice"],
   updatedAt: 0,
 };
-const blank = () => ({ v: 1, ...Object.fromEntries(COLLS.map(c => [c, []])), settings: { ...DEFAULT_SETTINGS }, deleted: {} });
+const blank = () => ({ v: 1, ...Object.fromEntries(DATA_COLLS.map(c => [c, []])), settings: { ...DEFAULT_SETTINGS }, deleted: {} });
 
 const LS_DATA = "studio_data", LS_CFG = "studio_cfg";
-let S = (() => { try { const d = JSON.parse(localStorage.getItem(LS_DATA)); if (d && d.v) { for (const c of COLLS) d[c] ||= []; d.deleted ||= {}; d.settings = { ...DEFAULT_SETTINGS, ...d.settings }; return d; } } catch {} return blank(); })();
+let S = (() => { try { const d = JSON.parse(localStorage.getItem(LS_DATA)); if (d && d.v) { for (const c of DATA_COLLS) d[c] ||= []; d.deleted ||= {}; d.settings = { ...DEFAULT_SETTINGS, ...d.settings }; return d; } } catch {} return blank(); })();
 let CFG = (() => { try { return JSON.parse(localStorage.getItem(LS_CFG)) || {}; } catch { return {}; } })();
 const saveLocal = () => { try { localStorage.setItem(LS_DATA, JSON.stringify(S)); } catch (e) { toast("Couldn't save on this device: " + e.message); } };
-const saveCfg = () => localStorage.setItem(LS_CFG, JSON.stringify(CFG));
+const saveCfg = () => { localStorage.setItem(LS_CFG, JSON.stringify(CFG)); shareWithWorker(); };
+// The background helper (sw.js) can't read localStorage, so it gets its own copy of
+// the sync details in IndexedDB. It needs them to snooze or tick off a reminder
+// straight from a notification.
+function idbKV() {
+  return new Promise((res, rej) => { const r = indexedDB.open("studio", 1); r.onupgradeneeded = () => r.result.createObjectStore("kv"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function shareWithWorker() {
+  try { const db = await idbKV(); const tx = db.transaction("kv", "readwrite"); tx.objectStore("kv").put({ sync: CFG.sync || null, me: CFG.me || "" }, "cfg"); } catch {}
+}
 const ME = () => CFG.me || S.settings.people[0];
 const OTHER = () => S.settings.people.find(p => p !== ME()) || S.settings.people[1];
 
@@ -382,7 +394,7 @@ function merge(a, b) {
   const out = blank();
   out.deleted = { ...(a.deleted || {}) };
   for (const [id, ts] of Object.entries(b.deleted || {})) out.deleted[id] = Math.max(out.deleted[id] || 0, ts);
-  for (const c of COLLS) {
+  for (const c of DATA_COLLS) {
     const map = new Map();
     for (const r of [...(a[c] || []), ...(b[c] || [])]) {
       const cur = map.get(r.id);
@@ -397,7 +409,7 @@ function merge(a, b) {
 // Same data always serialises the same way, so we can tell if anything really changed.
 function canon(d) {
   const out = { v: 1 };
-  for (const c of COLLS) out[c] = [...(d[c] || [])].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  for (const c of DATA_COLLS) out[c] = [...(d[c] || [])].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
   out.settings = { ...DEFAULT_SETTINGS, ...(d.settings || {}) };
   // forget deletion markers older than 120 days to keep the file small
   const cutoff = Date.now() - 120 * 864e5;
@@ -846,8 +858,172 @@ function taskRow(k) {
   return `<div class="row" data-act="task" data-id="${k.id}">
     <input type="checkbox" ${k.done ? "checked" : ""} data-act="toggle-task" data-id="${k.id}" style="width:22px;height:22px;accent-color:var(--sage);flex:none;cursor:pointer" aria-label="Done">
     <span class="grow"><span class="t" style="display:block;${k.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(k.title)}</span>
-    <span class="s" style="display:block">${[k.date ? `<span style="${late ? "color:var(--bad)" : ""}">${niceDate(k.date)}${k.time ? " " + k.time : ""}</span>` : "", link ? esc(link.business) : "", k.who && k.who !== "Both" ? esc(k.who) : ""].filter(Boolean).join(" · ") || "No date"}</span></span></div>`;
+    <span class="s" style="display:block">${[k.date ? `<span style="${late ? "color:var(--bad)" : ""}">${niceDate(k.date)}${k.time ? " " + k.time : ""}</span>` : "", isSnoozed(k) ? `<span style="color:var(--sky)">Snoozed to ${esc(snoozeLabel(k.snoozeUntil))}</span>` : "", link ? esc(link.business) : "", k.who && k.who !== "Both" ? esc(k.who) : ""].filter(Boolean).join(" · ") || "No date"}</span></span></div>`;
 }
+/* =====================================================================
+   Notifications: reminders that pop up on your phone even when the app
+   is closed. A small Cloudflare Worker (worker/worker.js) checks the
+   shared data every minute and sends them. This part switches them on
+   for this device and handles snoozing.
+   ===================================================================== */
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isInstalled = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const b64url = buf => { let s = ""; for (const b of new Uint8Array(buf)) s += String.fromCharCode(b); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+const unb64url = str => Uint8Array.from(atob(str.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((str.length + 3) % 4)), c => c.charCodeAt(0));
+let NOTIFY_PRIV = ""; // the private key, shown once while setting up; never saved or synced
+
+function deviceId() { if (!CFG.deviceId) { CFG.deviceId = uid(); saveCfg(); } return CFG.deviceId; }
+const myDevice = () => S.devices.find(d => d.id === CFG.deviceId);
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  return /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) || isIOS() ? "iPad" : /Android/.test(ua) ? "Android phone" : /Mac/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows computer" : "computer";
+}
+const pushReady = () => !!(S.settings.pushKey && S.settings.pushWorker);
+
+// What the Notifications card should show for this device.
+function pushState() {
+  if (!pushReady()) return "not-setup";
+  if (isIOS() && !isInstalled()) return "needs-install";
+  if (!pushSupported()) return "unsupported";
+  if (Notification.permission === "denied") return "denied";
+  if (CFG.pushOn && Notification.permission === "granted" && myDevice()) return "on";
+  return "off";
+}
+
+async function subscribeThisDevice() {
+  const reg = await navigator.serviceWorker.ready;
+  const key = S.settings.pushKey;
+  let sub = await reg.pushManager.getSubscription();
+  // A new notification key was made: swap the old subscription for a new one.
+  if (sub && (!myDevice() || myDevice().key !== key)) { await sub.unsubscribe().catch(() => {}); sub = null; }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64url(key) });
+  return sub;
+}
+function saveDevice(sub) {
+  const j = sub.toJSON(), cur = myDevice();
+  const rec = { id: deviceId(), who: ME(), label: deviceLabel(), key: S.settings.pushKey, sub: { endpoint: j.endpoint, keys: j.keys } };
+  // Only save when something really changed, so we don't make a GitHub commit every time the app opens.
+  if (cur && cur.who === rec.who && cur.key === rec.key && cur.sub && cur.sub.endpoint === rec.sub.endpoint && cur.sub.keys.auth === rec.sub.keys.auth) return;
+  upsert("devices", { ...(cur || {}), ...rec });
+}
+
+async function turnOnPush() {
+  const st = pushState();
+  if (st === "needs-install") { toast("Add Studio to your Home Screen first, then open it from there"); return; }
+  if (st === "unsupported") { toast("This browser can't show notifications"); return; }
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { toast("Notifications are blocked. Allow them for Studio in your phone's settings."); refreshTop(settingsSheet); return; }
+  try {
+    const sub = await subscribeThisDevice();
+    CFG.pushOn = true; saveCfg();
+    saveDevice(sub);
+    toast("Notifications on for this " + deviceLabel());
+  } catch (e) { toast("Couldn't switch on notifications: " + e.message); }
+  refreshTop(settingsSheet);
+}
+async function turnOffPush() {
+  try { const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager.getSubscription(); if (sub) await sub.unsubscribe(); } catch {}
+  CFG.pushOn = false; saveCfg();
+  if (myDevice()) removeRec("devices", CFG.deviceId);
+  toast("Notifications off for this device"); refreshTop(settingsSheet);
+}
+// Runs when the app opens: keeps this device's subscription fresh, and tidies up
+// if notifications were switched off in the phone's settings.
+async function checkPush() {
+  if (!CFG.pushOn || !pushReady() || !pushSupported() || !CFG.me) return;
+  if (Notification.permission !== "granted") { CFG.pushOn = false; saveCfg(); if (myDevice()) removeRec("devices", CFG.deviceId); return; }
+  try { saveDevice(await subscribeThisDevice()); } catch {}
+}
+
+// Damien does this once. The public half goes into the shared data (so both phones
+// can use it); the private half is pasted into the Cloudflare Worker.
+async function makeNotifyKey() {
+  if (S.settings.pushKey && !confirm("Make a new notification key? You'll need to paste the new one into Cloudflare too.")) return;
+  const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const pub = await crypto.subtle.exportKey("raw", kp.publicKey);
+  NOTIFY_PRIV = (await crypto.subtle.exportKey("jwk", kp.privateKey)).d;
+  saveSettings({ pushKey: b64url(pub), tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "Africa/Johannesburg" });
+  refreshTop(settingsSheet);
+}
+async function sendTestPush() {
+  toast("Sending…");
+  await syncNow(true); // make sure the Worker can see this device
+  try {
+    const res = await fetch(S.settings.pushWorker.replace(/\/+$/, "") + "/test", { method: "POST", headers: { Authorization: "Bearer " + CFG.sync.token, "Content-Type": "application/json" }, body: JSON.stringify({ deviceId: CFG.deviceId }) });
+    const j = await res.json().catch(() => ({}));
+    toast(res.ok ? "Sent! It should pop up in a few seconds" : (j.error || "The Worker said " + res.status));
+  } catch { toast("Couldn't reach the Worker. Check the link in Settings."); }
+}
+
+/* ---------- Snooze ---------- */
+const SNOOZES = [["15m", "15 min"], ["1h", "1 hour"], ["3h", "3 hours"], ["tmr", "Tomorrow 8am"]];
+function snoozeTime(k) {
+  if (k === "tmr") { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(8, 0, 0, 0); return d.getTime(); }
+  const min = { "15m": 15, "1h": 60, "3h": 180 }[k] || 60;
+  return Math.ceil((Date.now() + min * 60000) / 60000) * 60000; // on the minute
+}
+function snoozeLabel(ts) {
+  const d = new Date(ts), hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return (ymd(d) === today() ? "" : niceDate(ymd(d)) + " ") + hm;
+}
+const isSnoozed = t => t.snoozeUntil && t.snoozeUntil > Date.now() && !t.done;
+
+/* ---------- Settings card ---------- */
+function notifySection() {
+  const st = S.settings, state = pushState();
+  if (!CFG.sync) return `<p class="small muted" style="margin:0">Set up “Share between your phones” first. Notifications are sent from the shared data.</p>`;
+  const thisDevice = {
+    "needs-install": `<p class="small" style="margin:0">On iPhone, notifications only work from the Home Screen app. In Safari tap Share → <b>Add to Home Screen</b>, open Studio from there, then come back here.</p>`,
+    unsupported: `<p class="small muted" style="margin:0">This browser can't show notifications. Try Chrome on Android or the Home Screen app on iPhone.</p>`,
+    denied: `<p class="small" style="margin:0">Notifications are blocked for Studio. Allow them in your phone's settings (Settings → Notifications → Studio), then come back here.</p>`,
+    off: `<p class="small" style="margin:0 0 10px">Get a notification when a reminder is due, even when the app is closed. Reminders without a time ping at 8am on the day.</p>
+      <button class="btn primary" style="width:100%" data-act="push-on">${icon("bell")}Turn on for this ${esc(deviceLabel())}</button>`,
+    on: `<p style="margin:0 0 10px"><span class="pill p-sage">${icon("check", 'style="width:13px;height:13px"')} On for this ${esc(deviceLabel())}</span></p>
+      <p class="small muted" style="margin:0 0 10px">You'll get ${esc(ME())}'s reminders and ones for “Both”. ${S.devices.length > 1 ? "Also on: " + esc(S.devices.filter(d => d.id !== CFG.deviceId).map(d => d.who + "'s " + d.label).join(", ")) + "." : ""}</p>
+      <div class="actions" style="margin:0"><button class="btn sm" data-act="push-test">${icon("bell")}Send a test</button><button class="btn sm danger" data-act="push-off">Turn off</button></div>`,
+  };
+  if (state !== "not-setup") return thisDevice[state] + `<details style="margin-top:12px"><summary class="small muted" style="cursor:pointer">Notification setup</summary>${setupSteps()}</details>`;
+  return `<p class="small" style="margin:0 0 6px">Get a notification on your phone when a reminder is due, even when Studio is closed.</p>
+    <p class="small muted" style="margin:0 0 6px">${esc(st.people[0])} sets this up once (10 minutes, on a laptop is easiest). After that, each of you taps “Turn on” on your own phone.</p>${setupSteps(true)}`;
+}
+function setupSteps(open) {
+  const st = S.settings;
+  const keyBox = NOTIFY_PRIV ? `<div class="card pad" style="background:var(--butter-soft);margin:8px 0"><div class="small" style="margin-bottom:6px"><b>Your private notification key</b>. Copy it now — it's only shown once.</div>
+      <code style="word-break:break-all;font-size:12px">${esc(NOTIFY_PRIV)}</code><br><button class="btn sm" style="margin-top:8px" data-act="copy-text" data-id="${esc(NOTIFY_PRIV)}">${icon("copy")}Copy key</button></div>` : "";
+  return `<ol class="small" style="padding-left:18px;line-height:1.65;margin:8px 0">
+      <li><b>Make a key.</b> ${st.pushKey ? `Done ✓ <button class="btn sm ghost" data-act="push-key">Make a new one</button>` : `<button class="btn sm primary" data-act="push-key">Make notification key</button>`}${keyBox}</li>
+      <li><b>Make the Worker.</b> On <b>dash.cloudflare.com</b> go to <b>Workers &amp; Pages → Create → Worker</b>. Call it <b>studio-reminders</b> and deploy the “Hello World” starter. Then tap <b>Edit code</b>, delete everything, paste the Worker code and deploy. <button class="btn sm" data-act="copy-worker">${icon("copy")}Copy Worker code</button></li>
+      <li><b>Add two secrets.</b> In the Worker's <b>Settings → Variables and Secrets</b>, add two of type <b>Secret</b>:<br>
+        <b>GITHUB_TOKEN</b> = your access token <button class="btn sm" data-act="copy-token">${icon("copy")}Copy token</button><br>
+        <b>VAPID_PRIVATE_KEY</b> = the private key from step 1</li>
+      <li><b>Run it every minute.</b> In <b>Settings → Trigger events</b> (or Triggers), add a <b>Cron Trigger</b> and choose every minute (<code>* * * * *</code>).</li>
+      <li><b>Paste the Worker's link here</b> (it looks like https://studio-reminders.yourname.workers.dev):</li>
+    </ol>
+    <div style="display:flex;gap:8px"><input id="workerUrl" value="${esc(st.pushWorker)}" placeholder="https://studio-reminders….workers.dev" style="flex:1;min-width:0;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--surface);font-size:16px"><button class="btn" data-act="push-worker">Save</button></div>
+    ${st.pushWorker ? `<p class="small muted" style="margin:8px 0 0">To check it's all working, open the Worker's link in your browser. It should say <code>"ok": true</code>.</p>` : ""}`;
+}
+async function saveWorkerUrl() {
+  let v = ($("#workerUrl") || {}).value.trim().replace(/\/+$/, "");
+  if (v && !/^https?:\/\//.test(v)) v = "https://" + v;
+  if (v && !/^https:\/\/[^/]+\.[^/]+/.test(v)) { toast("That doesn't look like a link"); return; }
+  saveSettings({ pushWorker: v });
+  toast(v ? "Saved. Now tap “Turn on” on each phone" : "Removed"); refreshTop(settingsSheet);
+}
+async function copyText(text, msg) {
+  try { await navigator.clipboard.writeText(text); toast(msg || "Copied"); } catch { prompt("Copy this:", text); }
+}
+async function copyWorkerCode() {
+  try { const r = await fetch("worker/worker.js", { cache: "no-store" }); if (!r.ok) throw 0; await copyText(await r.text(), "Worker code copied"); }
+  catch { toast("Couldn't load it. It's in the studio repo on GitHub: worker/worker.js"); }
+}
+
+// When a notification is tapped, or the helper changed something in the background.
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => {
+  const m = e.data || {};
+  if (m.type === "open-task" && m.id) { syncNow(true).finally(() => { if (get("tasks", m.id)) { closeAll(); editTask({ ...get("tasks", m.id) }); } }); }
+  if (m.type === "changed") syncNow(true);
+});
 /* =====================================================================
    Pop-up sheets: details, forms, settings
    ===================================================================== */
@@ -1290,13 +1466,28 @@ function editTask(rec = {}) {
     title: rec.id ? "Edit reminder" : "New reminder",
     fields: [
       { k: "title", label: "What", req: true, ph: "Call Sipho about the quote" },
-      { k: "date", label: "Day", type: "date", half: true }, { k: "time", label: "Time (optional)", type: "time", half: true },
+      { k: "date", label: "Day", type: "date", half: true }, { k: "time", label: "Time (optional)", type: "time", half: true, hint: pushReady() ? "No time? It pings at 8am." : "" },
       { k: "who", label: "For", type: "select", options: whoOptions(), half: true },
       { k: "linkId", label: "About", type: "select", options: links, half: true },
       { k: "notes", label: "Notes", type: "textarea" },
     ],
     rec, saveLabel: rec.id ? "Save" : "Add reminder",
     onMount: ov => {
+      if (rec.id && !rec.done) {
+        // Snooze buttons at the top (this is also where you land when you tap a notification)
+        const box = document.createElement("div"); box.className = "card pad"; box.style.marginBottom = "12px";
+        box.innerHTML = `<div class="small" style="font-weight:600;margin-bottom:8px">${isSnoozed(rec) ? `Snoozed until ${esc(snoozeLabel(rec.snoozeUntil))} · <a href="#" data-unsnooze>Cancel snooze</a>` : "Snooze"}</div>
+          <div class="chips" style="padding:0;flex-wrap:wrap">${SNOOZES.map(([k, l]) => `<button type="button" class="chip" data-snooze="${k}">${l}</button>`).join("")}</div>`;
+        box.onclick = e => {
+          const b = e.target.closest("[data-snooze],[data-unsnooze]"); if (!b) return;
+          e.preventDefault(); e.stopPropagation();
+          const t = get("tasks", rec.id); if (!t) return;
+          closeSheet();
+          if (b.dataset.snooze) { const at = snoozeTime(b.dataset.snooze); upsert("tasks", { ...t, snoozeUntil: at }); toast("Snoozed until " + snoozeLabel(at)); }
+          else { const { snoozeUntil, ...rest } = t; upsert("tasks", rest); toast("Snooze cancelled"); }
+        };
+        ov.querySelector("#frm").before(box);
+      }
       if (rec.id) {
         const f = ov.querySelector(".sheet-f");
         const b = document.createElement("button"); b.className = "btn"; b.style.flex = "0 0 auto"; b.title = "Add to phone calendar"; b.innerHTML = icon("cal");
@@ -1304,6 +1495,7 @@ function editTask(rec = {}) {
       }
     },
     onSave: r => {
+      if (r.date !== rec.date || r.time !== rec.time) delete r.snoozeUntil; // new time replaces the snooze
       upsert("tasks", r); toast(rec.id ? "Reminder updated" : "Reminder added");
       const top = SHEETS[SHEETS.length - 1];
       if (top && top.dataset.key) { const [k, id] = top.dataset.key.split(":"); refreshTop(() => ({ lead: leadDetail, client: clientDetail })[k]?.(id)); }
@@ -1362,6 +1554,9 @@ function settingsSheet() {
         <div class="small muted" style="margin:16px 0 6px">Or, if ${esc(OTHER())} already set it up, paste their invite link:</div>
         <div style="display:flex;gap:8px"><input id="joinLink" placeholder="https://…#join=…" style="flex:1;min-width:0;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--surface);font-size:16px"><button class="btn" data-act="join-paste">Join</button></div>`}
       </div>
+
+      <div class="section-h section"><h2 style="font-size:17px">Notifications</h2></div>
+      <div class="card pad">${notifySection()}</div>
 
       <div class="section-h section"><h2 style="font-size:17px">On your quotes & invoices</h2></div>
       <div class="card pad"><form class="form" id="setForm">
@@ -1472,8 +1667,11 @@ const ACT = {
   "doc-wa": id => { const d = get("docs", id), c = get("clients", d.clientId) || (d.leadId && get("leads", d.leadId)) || {}; window.open(c.phone ? waLink(c.phone, docMessage(d)) : "https://wa.me/?text=" + encodeURIComponent(docMessage(d)), "_blank"); if (d.status === "draft") upsert("docs", { ...d, status: "sent", sentOn: today() }); },
   "doc-mail": id => { const d = get("docs", id), c = get("clients", d.clientId) || {}; location.href = `mailto:${encodeURIComponent(c.email || "")}?subject=${encodeURIComponent(`${d.type === "quote" ? "Quote" : "Invoice"} ${d.number} from ${S.settings.bizName}`)}&body=${encodeURIComponent(docMessage(d) + "\n\n(PDF attached)")}`; },
   "doc-dup": id => { const d = JSON.parse(JSON.stringify(get("docs", id))); for (const k of ["id", "createdAt", "updatedAt", "by", "sentOn", "fromQuote"]) delete d[k]; closeSheet(); editDoc({ ...newDoc(d.type), clientId: d.clientId, jobId: d.jobId, items: d.items, discount: d.discount, vat: d.vat, notes: d.notes }); },
-  "toggle-task": (id, el) => { const t = get("tasks", id); upsert("tasks", { ...t, done: el.checked, doneAt: el.checked ? Date.now() : null }); if (el.checked) toast("Done ✓"); const top = SHEETS[SHEETS.length - 1]; if (top && top.dataset.key) { const [k, kid] = top.dataset.key.split(":"); refreshTop(() => ({ lead: leadDetail, client: clientDetail })[k]?.(kid)); } },
-  "pick-me": id => { CFG.me = id; saveCfg(); if (SHEETS.length) refreshTop(settingsSheet); render(); syncNow(true); },
+  "toggle-task": (id, el) => { const t = get("tasks", id); upsert("tasks", { ...t, done: el.checked, doneAt: el.checked ? Date.now() : null, snoozeUntil: el.checked ? null : t.snoozeUntil }); if (el.checked) toast("Done ✓"); const top = SHEETS[SHEETS.length - 1]; if (top && top.dataset.key) { const [k, kid] = top.dataset.key.split(":"); refreshTop(() => ({ lead: leadDetail, client: clientDetail })[k]?.(kid)); } },
+  "pick-me": id => { CFG.me = id; saveCfg(); if (SHEETS.length) refreshTop(settingsSheet); render(); checkPush(); syncNow(true); },
+  "push-on": () => turnOnPush(), "push-off": () => turnOffPush(), "push-test": () => sendTestPush(),
+  "push-key": () => makeNotifyKey(), "push-worker": () => saveWorkerUrl(), "copy-worker": () => copyWorkerCode(),
+  "copy-token": () => copyText(CFG.sync.token, "Token copied. Keep it private"), "copy-text": id => copyText(id),
   "theme": id => { CFG.theme = id; saveCfg(); applyTheme(); refreshTop(settingsSheet); },
   "save-settings": () => {
     const f = $("#setForm"), v = k => f.querySelector(`[name="${k}"]`).value;
@@ -1546,9 +1744,15 @@ function joinFromCode(code) {
     if (!joinFromCode(m[1])) alert("That invite link looks broken. Ask for a new one.");
     history.replaceState(null, "", location.pathname);
   }
+  // Opened by tapping a notification
+  const tk = location.hash.match(/#task=([^&]+)/);
+  if (tk) history.replaceState(null, "", location.pathname);
   applyTheme(); render();
-  if (CFG.sync) syncNow(true);
+  shareWithWorker();
+  const ready = CFG.sync ? syncNow(true) : Promise.resolve();
+  if (tk) ready.finally(() => { const t = get("tasks", tk[1]); if (t && CFG.me) editTask({ ...t }); });
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
+  ready.finally(checkPush);
 })();
 </script>
 </body>
