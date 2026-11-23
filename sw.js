@@ -1,5 +1,5 @@
 // Bump VERSION whenever you change the app so phones pick up the new files.
-const VERSION = "studio-v1";
+const VERSION = "studio-v2";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {

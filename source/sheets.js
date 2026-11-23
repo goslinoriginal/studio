@@ -508,7 +508,9 @@ function settingsSheet() {
           ${fieldHTML({ k: "s_repo", label: "Repository", half: true }, "studio-data")}
           ${fieldHTML({ k: "s_token", label: "Access token", type: "password", ph: "github_pat_…" }, "")}
         </div>
-        <button class="btn primary" style="width:100%;margin-top:12px" data-act="connect">${icon("sync")}Connect</button>`}
+        <button class="btn primary" style="width:100%;margin-top:12px" data-act="connect">${icon("sync")}Connect</button>
+        <div class="small muted" style="margin:16px 0 6px">Or, if ${esc(OTHER())} already set it up, paste their invite link:</div>
+        <div style="display:flex;gap:8px"><input id="joinLink" placeholder="https://…#join=…" style="flex:1;min-width:0;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--surface);font-size:16px"><button class="btn" data-act="join-paste">Join</button></div>`}
       </div>
 
       <div class="section-h section"><h2 style="font-size:17px">On your quotes & invoices</h2></div>
@@ -641,6 +643,11 @@ const ACT = {
     if (SYNC.state === "error") { const m = SYNC.msg; delete CFG.sync; saveCfg(); setSync("off"); toast(m); return; }
     toast("Connected! Now send the invite link"); refreshTop(settingsSheet); render();
   },
+  "join-paste": () => {
+    const v = ($("#joinLink") || {}).value || "", m = v.match(/#join=([^&\s]+)/);
+    if (!m || !joinFromCode(m[1])) { toast("That doesn't look like an invite link"); return; }
+    toast("Linked! Now pick who you are"); render(); syncNow(true);
+  },
   "sync-now": () => { SYNC.manual = true; syncNow().then(() => { if (SHEETS.length) refreshTop(settingsSheet); }); },
   "invite": async () => {
     const code = b64enc(JSON.stringify({ o: CFG.sync.owner, r: CFG.sync.repo, t: CFG.sync.token }));
@@ -675,14 +682,18 @@ document.addEventListener("input", e => {
 });
 
 /* ---------- Start ---------- */
+function joinFromCode(code) {
+  try {
+    const j = JSON.parse(b64dec(decodeURIComponent(code)));
+    if (!j.o || !j.r || !j.t) return false;
+    CFG.sync = { owner: j.o, repo: j.r, token: j.t, path: "studio-data.json" }; saveCfg();
+    SYNC.state = "idle"; return true;
+  } catch { return false; }
+}
 (function start() {
   const m = location.hash.match(/#join=([^&]+)/);
   if (m) {
-    try {
-      const j = JSON.parse(b64dec(decodeURIComponent(m[1])));
-      CFG.sync = { owner: j.o, repo: j.r, token: j.t, path: "studio-data.json" }; saveCfg();
-      SYNC.state = "idle";
-    } catch { alert("That invite link looks broken. Ask for a new one."); }
+    if (!joinFromCode(m[1])) alert("That invite link looks broken. Ask for a new one.");
     history.replaceState(null, "", location.pathname);
   }
   applyTheme(); render();

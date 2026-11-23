@@ -54,7 +54,10 @@ function welcomeView() {
     ${joined ? `<div class="card pad small" style="margin-top:14px">${icon("sync", 'style="width:16px;height:16px;vertical-align:-3px"')} This phone is linked to your shared data. Pick who you are and you're in.</div>` : ""}
     <h3 style="margin-top:22px;font-size:18px">Who's using this device?</h3>
     <div class="who">${S.settings.people.map(p => `<button data-act="pick-me" data-id="${esc(p)}">${esc(p)}</button>`).join("")}</div>
-    <p class="small muted">You can change names, your business details and set up sharing in Settings afterwards.${joined ? "" : " If your partner already set it up, ask them for the invite link and open it on this device instead."}</p>
+    <p class="small muted">You can change names, your business details and set up sharing in Settings afterwards.</p>
+    ${joined ? "" : `<div class="card pad" style="margin-top:16px"><b style="font-size:14px">Got an invite link?</b>
+      <p class="small muted" style="margin:4px 0 10px">Paste it here to join your shared data (on iPhone, do this inside the home-screen app).</p>
+      <div style="display:flex;gap:8px"><input id="joinLink" placeholder="https://…#join=…" style="flex:1;min-width:0;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--surface);font-size:16px"><button class="btn primary" data-act="join-paste">Join</button></div></div>`}
   </div>`;
 }
 
